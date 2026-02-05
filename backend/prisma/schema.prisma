@@ -1,0 +1,719 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== ENUMS ====================
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+  READONLY
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum AccountSubType {
+  // Assets
+  CASH
+  BANK
+  ACCOUNTS_RECEIVABLE
+  INVENTORY
+  FIXED_ASSET
+  OTHER_ASSET
+  // Liabilities
+  ACCOUNTS_PAYABLE
+  CREDIT_CARD
+  CURRENT_LIABILITY
+  LONG_TERM_LIABILITY
+  // Equity
+  OWNERS_EQUITY
+  RETAINED_EARNINGS
+  // Revenue
+  INCOME
+  OTHER_INCOME
+  // Expense
+  EXPENSE
+  COST_OF_GOODS_SOLD
+  OTHER_EXPENSE
+}
+
+enum JournalSource {
+  MANUAL
+  INVOICE
+  BILL
+  CUSTOMER_PAYMENT
+  BILL_PAYMENT
+  BANK_IMPORT
+  ADJUSTMENT
+  OPENING_BALANCE
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PARTIAL
+  PAID
+  OVERDUE
+  VOID
+}
+
+enum BillStatus {
+  DRAFT
+  RECEIVED
+  PARTIAL
+  PAID
+  OVERDUE
+  VOID
+}
+
+enum PaymentMethod {
+  CASH
+  CHECK
+  CARD
+  ACH
+  WIRE
+  OTHER
+}
+
+enum BankAccountType {
+  CHECKING
+  SAVINGS
+  CREDIT_CARD
+  MONEY_MARKET
+  OTHER
+}
+
+enum BankTransactionType {
+  DEBIT
+  CREDIT
+}
+
+enum BankTransactionStatus {
+  PENDING
+  MATCHED
+  CATEGORIZED
+  RECONCILED
+  EXCLUDED
+}
+
+enum ReconciliationStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum ProductType {
+  INVENTORY
+  NON_INVENTORY
+  SERVICE
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+// ==================== MULTI-TENANT ====================
+
+model Company {
+  id              String   @id @default(uuid())
+  name            String
+  legalName       String?
+  taxId           String?
+  address         Json?
+  phone           String?
+  email           String?
+  website         String?
+  baseCurrency    String   @default("USD")
+  fiscalYearStart Int      @default(1) // Month (1-12)
+  settings        Json     @default("{}")
+  logo            String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  companyUsers       CompanyUser[]
+  accounts           Account[]
+  journalEntries     JournalEntry[]
+  customers          Customer[]
+  vendors            Vendor[]
+  invoices           Invoice[]
+  bills              Bill[]
+  customerPayments   CustomerPayment[]
+  billPayments       BillPayment[]
+  bankAccounts       BankAccount[]
+  products           Product[]
+  auditLogs          AuditLog[]
+  taxRates           TaxRate[]
+
+  @@map("companies")
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  passwordHash  String?
+  name          String
+  avatar        String?
+  oauthProvider String?
+  oauthId       String?
+  isActive      Boolean   @default(true)
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  companyUsers          CompanyUser[]
+  createdJournalEntries JournalEntry[]   @relation("CreatedBy")
+  approvedJournalEntries JournalEntry[]  @relation("ApprovedBy")
+  auditLogs             AuditLog[]
+  completedReconciliations BankReconciliation[]
+
+  @@unique([oauthProvider, oauthId])
+  @@map("users")
+}
+
+model CompanyUser {
+  id         String    @id @default(uuid())
+  companyId  String
+  userId     String
+  role       UserRole  @default(MEMBER)
+  isDefault  Boolean   @default(false)
+  invitedAt  DateTime  @default(now())
+  acceptedAt DateTime?
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, userId])
+  @@map("company_users")
+}
+
+// ==================== CHART OF ACCOUNTS ====================
+
+model Account {
+  id               String         @id @default(uuid())
+  companyId        String
+  code             String
+  name             String
+  type             AccountType
+  subType          AccountSubType
+  parentId         String?
+  description      String?
+  isSystemAccount  Boolean        @default(false)
+  isActive         Boolean        @default(true)
+  openingBalance   Decimal        @default(0) @db.Decimal(15, 2)
+  openingBalanceDate DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  // Relations
+  company         Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  parent          Account?       @relation("AccountHierarchy", fields: [parentId], references: [id])
+  children        Account[]      @relation("AccountHierarchy")
+  journalLines    JournalLine[]
+  invoiceLines    InvoiceLine[]
+  billLines       BillLine[]
+  bankAccount     BankAccount?
+  incomeProducts  Product[]      @relation("IncomeAccount")
+  expenseProducts Product[]      @relation("ExpenseAccount")
+  assetProducts   Product[]      @relation("AssetAccount")
+  defaultVendors  Vendor[]       @relation("DefaultExpenseAccount")
+  bankTransactions BankTransaction[]
+
+  @@unique([companyId, code])
+  @@index([companyId, type])
+  @@map("accounts")
+}
+
+// ==================== GENERAL LEDGER ====================
+
+model JournalEntry {
+  id              String        @id @default(uuid())
+  companyId       String
+  entryNumber     Int
+  date            DateTime      @db.Date
+  memo            String?
+  reference       String?
+  source          JournalSource @default(MANUAL)
+  sourceId        String?       // ID of invoice, bill, payment, etc.
+  isAdjusting     Boolean       @default(false)
+  isReversing     Boolean       @default(false)
+  reversedEntryId String?
+  isPosted        Boolean       @default(true)
+  createdById     String
+  approvedById    String?
+  approvedAt      DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  // Relations
+  company         Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy       User           @relation("CreatedBy", fields: [createdById], references: [id])
+  approvedBy      User?          @relation("ApprovedBy", fields: [approvedById], references: [id])
+  reversedEntry   JournalEntry?  @relation("ReversedEntry", fields: [reversedEntryId], references: [id])
+  reversingEntries JournalEntry[] @relation("ReversedEntry")
+  lines           JournalLine[]
+  matchedBankTransactions BankTransaction[]
+
+  @@unique([companyId, entryNumber])
+  @@index([companyId, date])
+  @@index([companyId, source, sourceId])
+  @@map("journal_entries")
+}
+
+model JournalLine {
+  id             String   @id @default(uuid())
+  journalEntryId String
+  accountId      String
+  debit          Decimal  @default(0) @db.Decimal(15, 2)
+  credit         Decimal  @default(0) @db.Decimal(15, 2)
+  memo           String?
+  customerId     String?
+  vendorId       String?
+  createdAt      DateTime @default(now())
+
+  // Relations
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account      Account      @relation(fields: [accountId], references: [id])
+  customer     Customer?    @relation(fields: [customerId], references: [id])
+  vendor       Vendor?      @relation(fields: [vendorId], references: [id])
+
+  @@index([journalEntryId])
+  @@index([accountId])
+  @@map("journal_lines")
+}
+
+// ==================== ACCOUNTS RECEIVABLE ====================
+
+model Customer {
+  id              String   @id @default(uuid())
+  companyId       String
+  code            String
+  name            String
+  displayName     String?
+  email           String?
+  phone           String?
+  website         String?
+  billingAddress  Json?
+  shippingAddress Json?
+  paymentTerms    Int      @default(30) // Days
+  creditLimit     Decimal? @db.Decimal(15, 2)
+  taxExempt       Boolean  @default(false)
+  taxExemptNumber String?
+  isActive        Boolean  @default(true)
+  notes           String?
+  customFields    Json     @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  company          Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  invoices         Invoice[]
+  customerPayments CustomerPayment[]
+  journalLines     JournalLine[]
+
+  @@unique([companyId, code])
+  @@index([companyId, name])
+  @@map("customers")
+}
+
+model Invoice {
+  id             String        @id @default(uuid())
+  companyId      String
+  customerId     String
+  invoiceNumber  String
+  date           DateTime      @db.Date
+  dueDate        DateTime      @db.Date
+  terms          Int           @default(30)
+  subtotal       Decimal       @default(0) @db.Decimal(15, 2)
+  taxTotal       Decimal       @default(0) @db.Decimal(15, 2)
+  discountTotal  Decimal       @default(0) @db.Decimal(15, 2)
+  total          Decimal       @default(0) @db.Decimal(15, 2)
+  amountPaid     Decimal       @default(0) @db.Decimal(15, 2)
+  amountDue      Decimal       @default(0) @db.Decimal(15, 2)
+  status         InvoiceStatus @default(DRAFT)
+  memo           String?
+  notes          String?
+  attachments    Json          @default("[]")
+  sentAt         DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  // Relations
+  company            Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer           Customer            @relation(fields: [customerId], references: [id])
+  lines              InvoiceLine[]
+  paymentAllocations PaymentAllocation[]
+
+  @@unique([companyId, invoiceNumber])
+  @@index([companyId, status])
+  @@index([companyId, customerId])
+  @@index([companyId, dueDate])
+  @@map("invoices")
+}
+
+model InvoiceLine {
+  id              String   @id @default(uuid())
+  invoiceId       String
+  productId       String?
+  description     String
+  quantity        Decimal  @default(1) @db.Decimal(15, 4)
+  unitPrice       Decimal  @default(0) @db.Decimal(15, 4)
+  amount          Decimal  @default(0) @db.Decimal(15, 2)
+  discountPercent Decimal  @default(0) @db.Decimal(5, 2)
+  discountAmount  Decimal  @default(0) @db.Decimal(15, 2)
+  taxRateId       String?
+  taxRate         Decimal  @default(0) @db.Decimal(5, 4)
+  taxAmount       Decimal  @default(0) @db.Decimal(15, 2)
+  accountId       String
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  // Relations
+  invoice  Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product  Product? @relation(fields: [productId], references: [id])
+  account  Account  @relation(fields: [accountId], references: [id])
+  tax      TaxRate? @relation(fields: [taxRateId], references: [id])
+
+  @@index([invoiceId])
+  @@map("invoice_lines")
+}
+
+model CustomerPayment {
+  id            String        @id @default(uuid())
+  companyId     String
+  customerId    String
+  paymentNumber String
+  date          DateTime      @db.Date
+  amount        Decimal       @db.Decimal(15, 2)
+  method        PaymentMethod @default(OTHER)
+  reference     String?
+  memo          String?
+  bankAccountId String?
+  depositedAt   DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  // Relations
+  company     Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer    Customer            @relation(fields: [customerId], references: [id])
+  bankAccount BankAccount?        @relation(fields: [bankAccountId], references: [id])
+  allocations PaymentAllocation[]
+
+  @@unique([companyId, paymentNumber])
+  @@index([companyId, customerId])
+  @@map("customer_payments")
+}
+
+model PaymentAllocation {
+  id        String   @id @default(uuid())
+  paymentId String
+  invoiceId String
+  amount    Decimal  @db.Decimal(15, 2)
+  createdAt DateTime @default(now())
+
+  // Relations
+  payment CustomerPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  invoice Invoice         @relation(fields: [invoiceId], references: [id])
+
+  @@unique([paymentId, invoiceId])
+  @@map("payment_allocations")
+}
+
+// ==================== ACCOUNTS PAYABLE ====================
+
+model Vendor {
+  id                      String   @id @default(uuid())
+  companyId               String
+  code                    String
+  name                    String
+  displayName             String?
+  email                   String?
+  phone                   String?
+  website                 String?
+  address                 Json?
+  paymentTerms            Int      @default(30)
+  defaultExpenseAccountId String?
+  taxId                   String?
+  is1099Eligible          Boolean  @default(false)
+  isActive                Boolean  @default(true)
+  notes                   String?
+  customFields            Json     @default("{}")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  // Relations
+  company               Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  defaultExpenseAccount Account?      @relation("DefaultExpenseAccount", fields: [defaultExpenseAccountId], references: [id])
+  bills                 Bill[]
+  billPayments          BillPayment[]
+  journalLines          JournalLine[]
+
+  @@unique([companyId, code])
+  @@index([companyId, name])
+  @@map("vendors")
+}
+
+model Bill {
+  id         String     @id @default(uuid())
+  companyId  String
+  vendorId   String
+  billNumber String
+  vendorRef  String?
+  date       DateTime   @db.Date
+  dueDate    DateTime   @db.Date
+  terms      Int        @default(30)
+  subtotal   Decimal    @default(0) @db.Decimal(15, 2)
+  taxTotal   Decimal    @default(0) @db.Decimal(15, 2)
+  total      Decimal    @default(0) @db.Decimal(15, 2)
+  amountPaid Decimal    @default(0) @db.Decimal(15, 2)
+  amountDue  Decimal    @default(0) @db.Decimal(15, 2)
+  status     BillStatus @default(DRAFT)
+  memo       String?
+  attachments Json      @default("[]")
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  // Relations
+  company              Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  vendor               Vendor                @relation(fields: [vendorId], references: [id])
+  lines                BillLine[]
+  paymentAllocations   BillPaymentAllocation[]
+
+  @@unique([companyId, billNumber])
+  @@index([companyId, status])
+  @@index([companyId, vendorId])
+  @@index([companyId, dueDate])
+  @@map("bills")
+}
+
+model BillLine {
+  id          String   @id @default(uuid())
+  billId      String
+  accountId   String
+  description String
+  quantity    Decimal  @default(1) @db.Decimal(15, 4)
+  unitPrice   Decimal  @default(0) @db.Decimal(15, 4)
+  amount      Decimal  @default(0) @db.Decimal(15, 2)
+  taxRateId   String?
+  taxRate     Decimal  @default(0) @db.Decimal(5, 4)
+  taxAmount   Decimal  @default(0) @db.Decimal(15, 2)
+  customerId  String?  // For billable expenses
+  isBillable  Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  // Relations
+  bill    Bill     @relation(fields: [billId], references: [id], onDelete: Cascade)
+  account Account  @relation(fields: [accountId], references: [id])
+  tax     TaxRate? @relation(fields: [taxRateId], references: [id])
+
+  @@index([billId])
+  @@map("bill_lines")
+}
+
+model BillPayment {
+  id            String        @id @default(uuid())
+  companyId     String
+  vendorId      String
+  paymentNumber String
+  date          DateTime      @db.Date
+  amount        Decimal       @db.Decimal(15, 2)
+  method        PaymentMethod @default(OTHER)
+  bankAccountId String?
+  checkNumber   String?
+  reference     String?
+  memo          String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  // Relations
+  company     Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  vendor      Vendor                  @relation(fields: [vendorId], references: [id])
+  bankAccount BankAccount?            @relation(fields: [bankAccountId], references: [id])
+  allocations BillPaymentAllocation[]
+
+  @@unique([companyId, paymentNumber])
+  @@index([companyId, vendorId])
+  @@map("bill_payments")
+}
+
+model BillPaymentAllocation {
+  id        String   @id @default(uuid())
+  paymentId String
+  billId    String
+  amount    Decimal  @db.Decimal(15, 2)
+  createdAt DateTime @default(now())
+
+  // Relations
+  payment BillPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  bill    Bill        @relation(fields: [billId], references: [id])
+
+  @@unique([paymentId, billId])
+  @@map("bill_payment_allocations")
+}
+
+// ==================== BANKING ====================
+
+model BankAccount {
+  id             String          @id @default(uuid())
+  companyId      String
+  accountId      String          @unique // Links to Chart of Accounts
+  bankName       String
+  accountNumber  String          // Masked
+  routingNumber  String?
+  accountType    BankAccountType @default(CHECKING)
+  currentBalance Decimal         @default(0) @db.Decimal(15, 2)
+  lastReconciled DateTime?
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  // Relations
+  company            Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  account            Account              @relation(fields: [accountId], references: [id])
+  transactions       BankTransaction[]
+  reconciliations    BankReconciliation[]
+  customerPayments   CustomerPayment[]
+  billPayments       BillPayment[]
+
+  @@index([companyId])
+  @@map("bank_accounts")
+}
+
+model BankTransaction {
+  id                    String                @id @default(uuid())
+  bankAccountId         String
+  transactionDate       DateTime              @db.Date
+  postDate              DateTime?             @db.Date
+  description           String
+  amount                Decimal               @db.Decimal(15, 2)
+  type                  BankTransactionType
+  fitId                 String?               // Bank's unique ID for dedup
+  checkNumber           String?
+  status                BankTransactionStatus @default(PENDING)
+  matchedJournalEntryId String?
+  categoryAccountId     String?
+  memo                  String?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  // Relations
+  bankAccount        BankAccount   @relation(fields: [bankAccountId], references: [id], onDelete: Cascade)
+  matchedJournalEntry JournalEntry? @relation(fields: [matchedJournalEntryId], references: [id])
+  categoryAccount    Account?      @relation(fields: [categoryAccountId], references: [id])
+
+  @@unique([bankAccountId, fitId])
+  @@index([bankAccountId, transactionDate])
+  @@index([bankAccountId, status])
+  @@map("bank_transactions")
+}
+
+model BankReconciliation {
+  id                String               @id @default(uuid())
+  bankAccountId     String
+  statementDate     DateTime             @db.Date
+  statementBalance  Decimal              @db.Decimal(15, 2)
+  reconciledBalance Decimal              @default(0) @db.Decimal(15, 2)
+  status            ReconciliationStatus @default(IN_PROGRESS)
+  completedAt       DateTime?
+  completedById     String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  // Relations
+  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id], onDelete: Cascade)
+  completedBy User?       @relation(fields: [completedById], references: [id])
+
+  @@index([bankAccountId])
+  @@map("bank_reconciliations")
+}
+
+// ==================== PRODUCTS & SERVICES ====================
+
+model Product {
+  id               String      @id @default(uuid())
+  companyId        String
+  sku              String
+  name             String
+  description      String?
+  type             ProductType @default(SERVICE)
+  salePrice        Decimal?    @db.Decimal(15, 4)
+  purchasePrice    Decimal?    @db.Decimal(15, 4)
+  incomeAccountId  String?
+  expenseAccountId String?
+  assetAccountId   String?
+  taxable          Boolean     @default(true)
+  isActive         Boolean     @default(true)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  // Relations
+  company        Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  incomeAccount  Account?      @relation("IncomeAccount", fields: [incomeAccountId], references: [id])
+  expenseAccount Account?      @relation("ExpenseAccount", fields: [expenseAccountId], references: [id])
+  assetAccount   Account?      @relation("AssetAccount", fields: [assetAccountId], references: [id])
+  invoiceLines   InvoiceLine[]
+
+  @@unique([companyId, sku])
+  @@index([companyId, name])
+  @@map("products")
+}
+
+// ==================== TAX ====================
+
+model TaxRate {
+  id           String   @id @default(uuid())
+  companyId    String
+  name         String
+  rate         Decimal  @db.Decimal(5, 4) // e.g., 0.0825 for 8.25%
+  description  String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  invoiceLines InvoiceLine[]
+  billLines    BillLine[]
+
+  @@unique([companyId, name])
+  @@map("tax_rates")
+}
+
+// ==================== AUDIT ====================
+
+model AuditLog {
+  id           String      @id @default(uuid())
+  companyId    String
+  userId       String
+  entityType   String
+  entityId     String
+  action       AuditAction
+  previousData Json?
+  newData      Json?
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime    @default(now())
+
+  // Relations
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([companyId, entityType, entityId])
+  @@index([companyId, createdAt])
+  @@map("audit_logs")
+}
