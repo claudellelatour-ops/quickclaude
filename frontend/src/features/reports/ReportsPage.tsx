@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { apiGet } from '@/api/client';
-import { formatCurrency, formatDate, cn } from '@/lib/utils';
+import { formatCurrency, cn } from '@/lib/utils';
 
 type ReportType = 'profit-loss' | 'balance-sheet' | 'trial-balance' | 'ar-aging' | 'ap-aging';
 

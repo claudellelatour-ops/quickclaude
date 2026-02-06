@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { apiGet, apiPost, apiPut } from '@/api/client';
+import { apiGet, apiPost } from '@/api/client';
 import { formatCurrency, cn } from '@/lib/utils';
 
 interface Customer {
